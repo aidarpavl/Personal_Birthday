@@ -1,0 +1,4 @@
+requests>=2.31
+tzdata
+telethon>=1.36,<2
+instagrapi>=2.1
