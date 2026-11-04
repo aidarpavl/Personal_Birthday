@@ -13,6 +13,10 @@ import requests
 from core import TIMEZONE, Person, today_local
 
 
+class TelegramSettingsError(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class Result:
     status: str  # sent | failed | not_found | no_recipient | uncertain
@@ -46,40 +50,68 @@ def send_sms(person: Person, text: str) -> Result:
 
 
 def send_telegram(person: Person, text: str) -> Result:
-    if not person.phone:
-        return Result("no_recipient", "нет телефона")
+    if not person.telegram and not person.phone:
+        return Result("no_recipient", "нет логина и телефона")
     return asyncio.run(_send_telegram(person, text))
 
 
-async def _send_telegram(person: Person, text: str) -> Result:
+def _telegram_client():
+    """Создаёт клиента. Понятно сообщает, какая именно настройка неверна."""
     from telethon import TelegramClient
-    from telethon.errors import RPCError
     from telethon.sessions import StringSession
+
+    api_id = os.environ["TELEGRAM_API_ID"].strip()
+    if not api_id.isdigit():
+        raise TelegramSettingsError("TELEGRAM_API_ID должен состоять только из цифр")
+    try:
+        session = StringSession(os.environ["TELEGRAM_SESSION"].strip())
+    except ValueError as error:
+        raise TelegramSettingsError(
+            "TELEGRAM_SESSION неверна: вставьте только строку из tools/telegram_login.py"
+        ) from error
+    return TelegramClient(session, int(api_id), os.environ["TELEGRAM_API_HASH"].strip())
+
+
+async def _find_telegram_user(client, person: Person):
+    """Сначала логин из столбца F, затем телефон. Возвращает None, если не нашли."""
     from telethon.tl.functions.contacts import ImportContactsRequest
     from telethon.tl.types import InputPhoneContact
 
-    client = TelegramClient(
-        StringSession(os.environ["TELEGRAM_SESSION"]),
-        int(os.environ["TELEGRAM_API_ID"]),
-        os.environ["TELEGRAM_API_HASH"],
-    )
+    if person.telegram:
+        try:
+            return await client.get_entity(person.telegram)
+        except ValueError:  # такого логина нет
+            pass
+    if not person.phone:
+        return None
     phone = f"+{person.phone}"
+    try:
+        # Если человек уже в контактах, его имя в записной книжке не меняем.
+        return await client.get_entity(phone)
+    except ValueError:
+        pass
+    parts = person.name.split(maxsplit=1)
+    imported = await client(ImportContactsRequest([InputPhoneContact(
+        client_id=random.randrange(1, 2**62), phone=phone,
+        first_name=parts[0], last_name=parts[1] if len(parts) > 1 else "",
+    )]))
+    return imported.users[0] if imported.users else None
+
+
+async def _send_telegram(person: Person, text: str) -> Result:
+    from telethon.errors import RPCError
+
+    try:
+        client = _telegram_client()
+    except TelegramSettingsError as error:
+        return Result("failed", str(error))
     await client.connect()
     try:
         if not await client.is_user_authorized():
             return Result("failed", "сессия Telegram устарела: создайте её заново")
-        try:
-            # Если человек уже в контактах, его имя в записной книжке не меняем.
-            target = await client.get_entity(phone)
-        except ValueError:
-            parts = person.name.split(maxsplit=1)
-            imported = await client(ImportContactsRequest([InputPhoneContact(
-                client_id=random.randrange(1, 2**62), phone=phone,
-                first_name=parts[0], last_name=parts[1] if len(parts) > 1 else "",
-            )]))
-            if not imported.users:
-                return Result("not_found", "номера нет в Telegram или он скрыт настройками")
-            target = imported.users[0]
+        target = await _find_telegram_user(client, person)
+        if target is None:
+            return Result("not_found", "логин не найден, а номера нет в Telegram или он скрыт")
         # Кнопка на сайте и рассылка по расписанию могут сработать в один день.
         today = today_local()
         async for message in client.iter_messages(target, limit=20, from_user="me"):
@@ -89,6 +121,8 @@ async def _send_telegram(person: Person, text: str) -> Result:
         return Result("sent")
     except RPCError as error:
         return Result("failed", type(error).__name__)
+    except ValueError as error:
+        return Result("failed", f"Telegram: {error}")
     finally:
         await client.disconnect()
 

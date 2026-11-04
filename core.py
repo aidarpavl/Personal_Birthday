@@ -30,6 +30,7 @@ class Person:
     birth_date: date
     phone: str | None  # формат 7XXXXXXXXXX
     instagram: str | None
+    telegram: str | None = None
 
 
 def today_local() -> date:
@@ -52,8 +53,15 @@ def normalize_instagram(raw: str) -> str | None:
     return value if re.fullmatch(r"[A-Za-z0-9._]{1,30}", value) else None
 
 
+def normalize_telegram(raw: str) -> str | None:
+    value = (raw or "").strip()
+    value = re.sub(r"^(https?://)?(www\.)?(t|telegram)\.me/", "", value, flags=re.I)
+    value = value.split("?")[0].strip("/").lstrip("@")
+    return value if re.fullmatch(r"[A-Za-z0-9_]{4,32}", value) else None
+
+
 def parse_people(csv_text: str) -> tuple[list[Person], list[str]]:
-    """Столбцы по порядку: A №, B ФИО, C дата рождения, D телефон, E логин Instagram.
+    """Столбцы по порядку: A №, B ФИО, C дата рождения, D телефон, E логин Instagram, F логин Telegram.
 
     Возвращает людей и список замечаний к таблице.
     """
@@ -61,8 +69,8 @@ def parse_people(csv_text: str) -> tuple[list[Person], list[str]]:
     issues: list[str] = []
     rows = list(csv.reader(io.StringIO(csv_text)))
     for line, row in enumerate(rows[1:], start=2):
-        row = [cell.strip() for cell in row] + [""] * 5
-        number, name, raw_date, raw_phone, raw_instagram = row[:5]
+        row = [cell.strip() for cell in row] + [""] * 6
+        number, name, raw_date, raw_phone, raw_instagram, raw_telegram = row[:6]
         if not name:
             continue
         number = number or f"строка {line}"
@@ -78,7 +86,10 @@ def parse_people(csv_text: str) -> tuple[list[Person], list[str]]:
         instagram = normalize_instagram(raw_instagram)
         if raw_instagram and not instagram:
             issues.append(f"№{number} {name}: неверный логин Instagram «{raw_instagram}»")
-        people.append(Person(number, name, birth_date, phone, instagram))
+        telegram = normalize_telegram(raw_telegram)
+        if raw_telegram and not telegram:
+            issues.append(f"№{number} {name}: неверный логин Telegram «{raw_telegram}»")
+        people.append(Person(number, name, birth_date, phone, instagram, telegram))
     return people, issues
 
 
@@ -131,10 +142,11 @@ def greeting_text(person: Person) -> str:
 
 
 def telegram_link(person: Person) -> str | None:
-    """Ссылка открывает чат по номеру с готовым текстом. Ключи не нужны."""
-    if not person.phone:
+    """Ссылка открывает чат с готовым текстом. Ключи не нужны. Логин важнее телефона."""
+    target = person.telegram or (f"+{person.phone}" if person.phone else None)
+    if not target:
         return None
-    return f"https://t.me/+{person.phone}?text={quote(greeting_text(person))}"
+    return f"https://t.me/{target}?text={quote(greeting_text(person))}"
 
 
 def read_log(path: Path = LOG_PATH) -> list[dict[str, str]]:

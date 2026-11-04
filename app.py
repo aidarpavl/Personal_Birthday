@@ -60,7 +60,7 @@ def telegram_configured() -> bool:
 def telegram_buttons(person: core.Person, text: str) -> None:
     link = core.telegram_link(person)
     if not link:
-        st.write("Telegram: нет телефона, отправить нельзя.")
+        st.write("Telegram: нет логина и телефона, отправить нельзя.")
         return
     key = f"telegram_{person.number}"
     result = st.session_state.get(key)
@@ -71,13 +71,15 @@ def telegram_buttons(person: core.Person, text: str) -> None:
                 try:
                     result = send_telegram(person, text)
                 except Exception as error:
-                    result = Result("failed", type(error).__name__)
+                    result = Result("failed", f"{type(error).__name__}: {error}"[:200])
             st.session_state[key] = result
         if result:
             label = STATUS_NAMES.get("failed_manual" if result.status == "failed" else result.status,
                                      result.status)
             st.write(f"Telegram, кнопка на сайте: {label} {result.detail}".rstrip())
     st.link_button("Открыть чат в Telegram с готовым текстом", link)
+    if person.telegram:
+        st.caption(f"Telegram: @{person.telegram}")
 
 
 def show_today(person: core.Person, today, log: list[dict[str, str]]) -> None:
