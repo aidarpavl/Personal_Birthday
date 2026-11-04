@@ -10,7 +10,7 @@ from typing import Callable
 
 import requests
 
-from core import Person
+from core import TIMEZONE, Person, today_local
 
 
 @dataclass(frozen=True)
@@ -80,6 +80,11 @@ async def _send_telegram(person: Person, text: str) -> Result:
             if not imported.users:
                 return Result("not_found", "номера нет в Telegram или он скрыт настройками")
             target = imported.users[0]
+        # Кнопка на сайте и рассылка по расписанию могут сработать в один день.
+        today = today_local()
+        async for message in client.iter_messages(target, limit=20, from_user="me"):
+            if message.message == text and message.date.astimezone(TIMEZONE).date() == today:
+                return Result("sent", "уже было отправлено сегодня")
         await client.send_message(target, text)
         return Result("sent")
     except RPCError as error:

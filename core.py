@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import requests
@@ -127,6 +128,13 @@ def upcoming(people: list[Person], start: date, days: int) -> list[tuple[date, P
 
 def greeting_text(person: Person) -> str:
     return f"{person.name} {GREETING_SUFFIX}"
+
+
+def telegram_link(person: Person) -> str | None:
+    """Ссылка открывает чат по номеру с готовым текстом. Ключи не нужны."""
+    if not person.phone:
+        return None
+    return f"https://t.me/+{person.phone}?text={quote(greeting_text(person))}"
 
 
 def read_log(path: Path = LOG_PATH) -> list[dict[str, str]]:

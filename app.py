@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import hmac
+import os
 
 import streamlit as st
 
 import core
+from channels import Result, send_telegram
 
+TELEGRAM_SECRETS = ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_SESSION")
 CHANNEL_NAMES = {"sms": "SMS", "telegram": "Telegram", "instagram": "Instagram"}
 STATUS_NAMES = {
     "sent": "✅ отправлено",
+    "failed_manual": "❌ ошибка",
     "failed": "❌ ошибка, будет повтор",
     "not_found": "⚠️ не найден в сервисе",
     "no_recipient": "➖ нет контакта",
@@ -45,6 +49,37 @@ def load(sheet_id: str, gid: str):
     return core.parse_people(core.load_sheet_csv(sheet_id, gid))
 
 
+def telegram_configured() -> bool:
+    values = {name: secret(name) for name in TELEGRAM_SECRETS}
+    if not all(values.values()):
+        return False
+    os.environ.update(values)
+    return True
+
+
+def telegram_buttons(person: core.Person, text: str) -> None:
+    link = core.telegram_link(person)
+    if not link:
+        st.write("Telegram: нет телефона, отправить нельзя.")
+        return
+    key = f"telegram_{person.number}"
+    result = st.session_state.get(key)
+    if telegram_configured():
+        if st.button("✈️ Отправить в Telegram", key=f"{key}_button",
+                     disabled=bool(result and result.status != "failed")):
+            with st.spinner("Отправляю…"):
+                try:
+                    result = send_telegram(person, text)
+                except Exception as error:
+                    result = Result("failed", type(error).__name__)
+            st.session_state[key] = result
+        if result:
+            label = STATUS_NAMES.get("failed_manual" if result.status == "failed" else result.status,
+                                     result.status)
+            st.write(f"Telegram, кнопка на сайте: {label} {result.detail}".rstrip())
+    st.link_button("Открыть чат в Telegram с готовым текстом", link)
+
+
 def show_today(person: core.Person, today, log: list[dict[str, str]]) -> None:
     st.success(f"🎉 **{person.name}** — сегодня день рождения, {core.age_on(person, today)} лет")
     rows = {r["channel"]: r for r in log
@@ -55,6 +90,7 @@ def show_today(person: core.Person, today, log: list[dict[str, str]]) -> None:
         st.write(f"{title}: {status}")
     text = core.greeting_text(person)
     st.code(text, language=None, wrap_lines=True)
+    telegram_buttons(person, text)
     if person.instagram:
         st.link_button(f"Открыть чат в Instagram: @{person.instagram}",
                        f"https://ig.me/m/{person.instagram}")
