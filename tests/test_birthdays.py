@@ -1,6 +1,8 @@
 import sys
-from datetime import date
+import types
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 import requests
@@ -165,3 +167,61 @@ def test_channels_enabled_only_when_configured(monkeypatch):
     monkeypatch.setenv("MOBIZON_API_KEY", "x")
     monkeypatch.setenv("TELEGRAM_API_ID", "1")  # неполные настройки Telegram
     assert list(channels.configured_channels()) == ["sms"]
+
+
+def test_telegram_link_opens_chat_with_encoded_text(people):
+    link = core.telegram_link(people[0])
+    assert link.startswith("https://t.me/+77001112233?text=")
+    assert " " not in link
+    assert unquote(link.split("text=")[1]) == core.greeting_text(people[0])
+    assert core.telegram_link(people[2]) is None
+
+
+def install_fake_telethon(monkeypatch, history, sent):
+    class FakeClient:
+        def __init__(self, *args):
+            pass
+        async def connect(self):
+            pass
+        async def disconnect(self):
+            pass
+        async def is_user_authorized(self):
+            return True
+        async def get_entity(self, phone):
+            return "target"
+        async def iter_messages(self, target, limit, from_user):
+            for message in history:
+                yield message
+        async def send_message(self, target, text):
+            sent.append(text)
+
+    errors = types.SimpleNamespace(RPCError=type("RPCError", (Exception,), {}))
+    modules = {
+        "telethon": types.SimpleNamespace(TelegramClient=FakeClient),
+        "telethon.errors": errors,
+        "telethon.sessions": types.SimpleNamespace(StringSession=lambda s: s),
+        "telethon.tl.functions.contacts": types.SimpleNamespace(ImportContactsRequest=None),
+        "telethon.tl.types": types.SimpleNamespace(InputPhoneContact=None),
+    }
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    for key in ("TELEGRAM_SESSION", "TELEGRAM_API_HASH"):
+        monkeypatch.setenv(key, "x")
+    monkeypatch.setenv("TELEGRAM_API_ID", "1")
+
+
+def test_telegram_does_not_repeat_todays_greeting(people, monkeypatch):
+    now = datetime.now(timezone.utc)
+    message = types.SimpleNamespace(message="текст", date=now)
+    sent = []
+    install_fake_telethon(monkeypatch, [message], sent)
+    assert channels.send_telegram(people[0], "текст").status == "sent"
+    assert sent == []
+
+
+def test_telegram_sends_when_only_last_years_greeting_exists(people, monkeypatch):
+    old = types.SimpleNamespace(message="текст", date=datetime.now(timezone.utc) - timedelta(days=365))
+    sent = []
+    install_fake_telethon(monkeypatch, [old], sent)
+    assert channels.send_telegram(people[0], "текст") == Result("sent")
+    assert sent == ["текст"]
