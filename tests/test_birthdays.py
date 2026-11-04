@@ -1,5 +1,6 @@
 import sys
 import types
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import unquote
@@ -177,7 +178,12 @@ def test_telegram_link_opens_chat_with_encoded_text(people):
     assert core.telegram_link(people[2]) is None
 
 
-def install_fake_telethon(monkeypatch, history, sent):
+def install_fake_telethon(monkeypatch, history, sent, known=("+77001112233",), session_error=False):
+    def fake_session(value):
+        if session_error:
+            raise ValueError("Not a valid string")
+        return value
+
     class FakeClient:
         def __init__(self, *args):
             pass
@@ -187,27 +193,34 @@ def install_fake_telethon(monkeypatch, history, sent):
             pass
         async def is_user_authorized(self):
             return True
-        async def get_entity(self, phone):
-            return "target"
+        async def get_entity(self, target):
+            lookups.append(target)
+            if target not in known:
+                raise ValueError("not found")
+            return target
+        async def __call__(self, request):
+            return types.SimpleNamespace(users=[])
         async def iter_messages(self, target, limit, from_user):
             for message in history:
                 yield message
         async def send_message(self, target, text):
-            sent.append(text)
+            sent.append((target, text))
 
+    lookups = []
     errors = types.SimpleNamespace(RPCError=type("RPCError", (Exception,), {}))
     modules = {
         "telethon": types.SimpleNamespace(TelegramClient=FakeClient),
         "telethon.errors": errors,
-        "telethon.sessions": types.SimpleNamespace(StringSession=lambda s: s),
-        "telethon.tl.functions.contacts": types.SimpleNamespace(ImportContactsRequest=None),
-        "telethon.tl.types": types.SimpleNamespace(InputPhoneContact=None),
+        "telethon.sessions": types.SimpleNamespace(StringSession=fake_session),
+        "telethon.tl.functions.contacts": types.SimpleNamespace(ImportContactsRequest=lambda contacts: contacts),
+        "telethon.tl.types": types.SimpleNamespace(InputPhoneContact=lambda **kwargs: kwargs),
     }
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
     for key in ("TELEGRAM_SESSION", "TELEGRAM_API_HASH"):
         monkeypatch.setenv(key, "x")
     monkeypatch.setenv("TELEGRAM_API_ID", "1")
+    return lookups
 
 
 def test_telegram_does_not_repeat_todays_greeting(people, monkeypatch):
@@ -224,4 +237,54 @@ def test_telegram_sends_when_only_last_years_greeting_exists(people, monkeypatch
     sent = []
     install_fake_telethon(monkeypatch, [old], sent)
     assert channels.send_telegram(people[0], "текст") == Result("sent")
-    assert sent == ["текст"]
+    assert sent == [("+77001112233", "текст")]
+
+
+def with_login(person, login):
+    return replace(person, telegram=login)
+
+
+def test_column_f_is_read():
+    people, issues = core.parse_people(
+        "h\n1,Тест,04.11.1990,87001112233,,@Good_Login\n2,Тест,04.11.1990,,,https://t.me/other_login\n"
+        "3,Тест,04.11.1990,,,bad login\n"
+    )
+    assert [p.telegram for p in people] == ["Good_Login", "other_login", None]
+    assert any("неверный логин Telegram" in i for i in issues)
+
+
+def test_telegram_prefers_login(people, monkeypatch):
+    sent = []
+    install_fake_telethon(monkeypatch, [], sent, known=("good_login",))
+    assert channels.send_telegram(with_login(people[0], "good_login"), "т") == Result("sent")
+    assert sent == [("good_login", "т")]
+
+
+def test_telegram_unknown_login_falls_back_to_phone(people, monkeypatch):
+    sent = []
+    install_fake_telethon(monkeypatch, [], sent)
+    assert channels.send_telegram(with_login(people[0], "missing"), "т") == Result("sent")
+    assert sent == [("+77001112233", "т")]
+
+
+def test_telegram_login_without_phone_and_not_found(people, monkeypatch):
+    sent = []
+    install_fake_telethon(monkeypatch, [], sent, known=())
+    person = with_login(people[2], "missing")
+    assert channels.send_telegram(person, "т").status == "not_found"
+    assert channels.send_telegram(people[2], "т").status == "no_recipient"
+
+
+@pytest.mark.parametrize("api_id,session_error,expected", [
+    ("ваш_api_id", False, "TELEGRAM_API_ID"),
+    ("1", True, "TELEGRAM_SESSION"),
+])
+def test_bad_settings_give_clear_message_not_valueerror(people, monkeypatch, api_id, session_error, expected):
+    install_fake_telethon(monkeypatch, [], [], session_error=session_error)
+    monkeypatch.setenv("TELEGRAM_API_ID", api_id)
+    result = channels.send_telegram(people[0], "т")
+    assert result.status == "failed" and expected in result.detail
+
+
+def test_link_prefers_login(people):
+    assert core.telegram_link(with_login(people[0], "good_login")).startswith("https://t.me/good_login?text=")
